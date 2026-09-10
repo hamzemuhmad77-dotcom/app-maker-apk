@@ -1,18 +1,109 @@
 name: Build APK
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Test
-        run: echo "صانع التطبيقات يعمل بنجاح" 
+      - name: Download H2APK
+        run: |
+          git clone --depth=1 https://github.com/HashShin/H2APK.git h2apk
+
+      - name: Setup H2APK
+        working-directory: h2apk
+        run: |
+          chmod +x setup.sh
+          ./setup.sh
+
+      - name: Build H2APK
+        working-directory: h2apk
+        run: |
+          go build -o h2apk main.go
+
+      - name: Start H2APK
+        working-directory: h2apk
+        run: |
+          PORT=8080 ./h2apk > server.log 2>&1 &
+          sleep 10
+
+      - name: Create Test HTML
+        run: |
+          cat > test.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="ar" dir="rtl">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>صانع التطبيقات</title>
+          </head>
+          <body>
+            <h1>🎉 صانع التطبيقات</h1>
+            <p>تم إنشاء أول تطبيق APK بنجاح.</p>
+          </body>
+          </html>
+          EOF
+
+      - name: Build APK
+        run: |
+          HTML=$(python3 -c 'import json; print(json.dumps(open("test.html", encoding="utf-8").read()))')
+
+          RESPONSE=$(curl -s -X POST \
+            http://localhost:8080/api/build \
+            -H "Content-Type: application/json" \
+            -d "{\"app_name\":\"صانع التطبيقات\",\"package_name\":\"com.appmaker.test\",\"version\":\"1.0\",\"version_code\":1,\"html\":$HTML,\"build_mode\":\"debug\"}")
+
+          echo "$RESPONSE"
+
+          BUILD_ID=$(echo "$RESPONSE" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("build_id",""))')
+
+          if [ -z "$BUILD_ID" ]; then
+            echo "فشل إرسال طلب البناء"
+            cat h2apk/server.log
+            exit 1
+          fi
+
+          echo "BUILD_ID=$BUILD_ID" >> "$GITHUB_ENV"
+
+      - name: Wait For APK
+        run: |
+          for i in {1..120}; do
+            RESPONSE=$(curl -s "http://localhost:8080/api/status/$BUILD_ID")
+            echo "$RESPONSE"
+
+            APK_NAME=$(echo "$RESPONSE" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("apk_name",""))')
+
+            if [ -n "$APK_NAME" ]; then
+              echo "APK created: $APK_NAME"
+              echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
+              break
+            fi
+
+            ERROR=$(echo "$RESPONSE" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("error",""))')
+
+            if [ -n "$ERROR" ]; then
+              echo "Build failed: $ERROR"
+              cat h2apk/server.log
+              exit 1
+            fi
+
+            sleep 3
+          done
+
+          if [ -z "$APK_NAME" ]; then
+            echo "Build timed out"
+            cat h2apk/server.log
+            exit 1
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-maker-test-apk
+          path: h2apk/output/${{ env.APK_NAME }}
+          if-no-files-found: error 

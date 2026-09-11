@@ -2,15 +2,43 @@ name: Build APK
 
 on:
   workflow_dispatch:
+    inputs:
+      app_name:
+        description: "اسم التطبيق"
+        required: true
+        type: string
+        default: "تطبيقي"
+
+      package_name:
+        description: "اسم الحزمة"
+        required: true
+        type: string
+        default: "com.appmaker.myapp"
+
+      version:
+        description: "إصدار التطبيق"
+        required: true
+        type: string
+        default: "1.0"
+
+      version_code:
+        description: "رقم إصدار التطبيق"
+        required: true
+        type: string
+        default: "1"
+
+      html:
+        description: "كود HTML الكامل"
+        required: true
+        type: string
+        default: "<!DOCTYPE html><html><body><h1>تطبيقي</h1></body></html>"
 
 jobs:
   build:
+    name: إنشاء APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Download H2APK
         run: |
           git clone --depth=1 https://github.com/HashShin/H2APK.git h2apk
@@ -32,35 +60,60 @@ jobs:
           PORT=8080 ./h2apk > server.log 2>&1 &
           sleep 10
 
-      - name: Create Test HTML
+      - name: Check H2APK
         run: |
-          cat > test.html <<'EOF'
-          <!DOCTYPE html>
-          <html lang="ar" dir="rtl">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width,initial-scale=1">
-            <title>صانع التطبيقات</title>
-          </head>
-          <body>
-            <h1>🎉 صانع التطبيقات</h1>
-            <p>تم إنشاء أول تطبيق APK بنجاح.</p>
-          </body>
-          </html>
-          EOF
+          curl -f http://localhost:8080/
 
-      - name: Build APK
+      - name: Send Build Request
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          VERSION: ${{ inputs.version }}
+          VERSION_CODE: ${{ inputs.version_code }}
+          HTML_CODE: ${{ inputs.html }}
         run: |
-          HTML=$(python3 -c 'import json; print(json.dumps(open("test.html", encoding="utf-8").read()))')
+          python3 - <<'PY'
+          import json
+          import os
 
-          RESPONSE=$(curl -s -X POST \
+          data = {
+              "app_name": os.environ["APP_NAME"],
+              "package_name": os.environ["PACKAGE_NAME"],
+              "version": os.environ["VERSION"],
+              "version_code": int(os.environ["VERSION_CODE"]),
+              "html": os.environ["HTML_CODE"],
+              "build_mode": "debug",
+              "min_sdk": 23,
+              "target_sdk": 35,
+              "zoom_enabled": True,
+              "pull_refresh": False,
+              "splash_enabled": True,
+              "splash_duration": 1200,
+              "splash_use_icon": True,
+              "transparent_nav": False,
+              "allow_cleartext": False,
+              "disable_copy_text": False,
+              "hide_scrollbars": False
+          }
+
+          with open("build-request.json", "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False)
+
+          print("تم تجهيز بيانات التطبيق")
+          PY
+
+          RESPONSE=$(curl -sS -X POST \
             http://localhost:8080/api/build \
             -H "Content-Type: application/json" \
-            -d "{\"app_name\":\"صانع التطبيقات\",\"package_name\":\"com.appmaker.test\",\"version\":\"1.0\",\"version_code\":1,\"html\":$HTML,\"build_mode\":\"debug\"}")
+            --data-binary @build-request.json)
 
-          echo "$RESPONSE"
+          echo "$RESPONSE" | tee build-response.json
 
-          BUILD_ID=$(echo "$RESPONSE" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("build_id",""))')
+          BUILD_ID=$(echo "$RESPONSE" | python3 -c '
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data.get("build_id", ""))
+          ')
 
           if [ -z "$BUILD_ID" ]; then
             echo "فشل إرسال طلب البناء"
@@ -69,25 +122,39 @@ jobs:
           fi
 
           echo "BUILD_ID=$BUILD_ID" >> "$GITHUB_ENV"
-
-      - name: Wait For APK
+                - name: Wait For APK
         run: |
+          APK_NAME=""
+
           for i in {1..120}; do
-            RESPONSE=$(curl -s "http://localhost:8080/api/status/$BUILD_ID")
+            echo "انتظار البناء: $i/120"
+
+            RESPONSE=$(curl -sS \
+              "http://localhost:8080/api/status/$BUILD_ID")
+
             echo "$RESPONSE"
 
-            APK_NAME=$(echo "$RESPONSE" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("apk_name",""))')
+            APK_NAME=$(echo "$RESPONSE" | python3 -c '
+            import sys, json
+            data = json.load(sys.stdin)
+            print(data.get("apk_name", ""))
+            ')
 
             if [ -n "$APK_NAME" ]; then
-              echo "APK created: $APK_NAME"
+              echo "تم إنشاء APK: $APK_NAME"
               echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
               break
             fi
 
-            ERROR=$(echo "$RESPONSE" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("error",""))')
+            ERROR=$(echo "$RESPONSE" | python3 -c '
+            import sys, json
+            data = json.load(sys.stdin)
+            print(data.get("error", ""))
+            ')
 
             if [ -n "$ERROR" ]; then
-              echo "Build failed: $ERROR"
+              echo "فشل البناء:"
+              echo "$ERROR"
               cat h2apk/server.log
               exit 1
             fi
@@ -96,14 +163,27 @@ jobs:
           done
 
           if [ -z "$APK_NAME" ]; then
-            echo "Build timed out"
+            echo "انتهى وقت انتظار البناء"
             cat h2apk/server.log
             exit 1
           fi
 
+      - name: Verify APK
+        run: |
+          APK_PATH="h2apk/output/$APK_NAME"
+
+          if [ ! -f "$APK_PATH" ]; then
+            echo "لم يتم العثور على ملف APK"
+            ls -la h2apk/output || true
+            exit 1
+          fi
+
+          echo "تم إنشاء APK بنجاح:"
+          ls -lh "$APK_PATH"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-maker-test-apk
+          name: ${{ inputs.app_name }}-APK
           path: h2apk/output/${{ env.APK_NAME }}
-          if-no-files-found: error 
+          if-no-files-found: error

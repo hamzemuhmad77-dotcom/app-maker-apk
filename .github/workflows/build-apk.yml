@@ -122,7 +122,8 @@ jobs:
           fi
 
           echo "BUILD_ID=$BUILD_ID" >> "$GITHUB_ENV"
-                - name: Wait For APK
+
+      - name: Wait For APK
         run: |
           APK_NAME=""
 
@@ -186,4 +187,4 @@ jobs:
         with:
           name: ${{ inputs.app_name }}-APK
           path: h2apk/output/${{ env.APK_NAME }}
-          if-no-files-found: error
+          if-no-files-found: error 

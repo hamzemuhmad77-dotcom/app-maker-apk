@@ -10,7 +10,8 @@ jobs:
     steps:
 
       - name: Download H2APK
-        run: git clone --depth 1 https://github.com/HashShin/H2APK.git h2apk
+        run: |
+          git clone --depth 1 https://github.com/HashShin/H2APK.git h2apk
 
       - name: Setup H2APK
         working-directory: h2apk
@@ -20,13 +21,54 @@ jobs:
 
       - name: Build H2APK
         working-directory: h2apk
-        run: go build -o h2apk main.go
+        run: |
+          go build -o h2apk main.go
 
       - name: Start H2APK
         working-directory: h2apk
         run: |
-          ./h2apk &
+          ./h2apk > server.log 2>&1 &
           sleep 10
 
-      - name: Test H2APK
-        run: curl -f http://localhost:8080/
+      - name: Create APK
+        run: |
+          cat > request.json <<'EOF'
+          {
+            "app_name": "تطبيقي",
+            "package_name": "com.appmaker.myapp",
+            "version": "1.0",
+            "version_code": 1,
+            "html": "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><h1>تطبيقي</h1><p>تم إنشاء هذا التطبيق بنجاح</p></body></html>",
+            "build_mode": "debug"
+          }
+          EOF
+
+          curl -sS -X POST \
+            http://localhost:8080/api/build \
+            -H "Content-Type: application/json" \
+            --data-binary @request.json
+
+          echo ""
+          echo "انتظار إنشاء APK..."
+
+          for i in {1..60}; do
+            sleep 3
+
+            if find h2apk/output -name "*.apk" -type f | grep -q .; then
+              echo "تم إنشاء APK بنجاح!"
+              break
+            fi
+
+            echo "انتظار... $i/60"
+          done
+
+      - name: Show APK
+        run: |
+          find h2apk/output -type f -name "*.apk" -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: my-app-apk
+          path: h2apk/output/*.apk
+          if-no-files-found: error

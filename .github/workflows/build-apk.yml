@@ -187,4 +187,4 @@ jobs:
         with:
           name: ${{ inputs.app_name }}-APK
           path: h2apk/output/${{ env.APK_NAME }}
-          if-no-files-found: error 
+          if-no-files-found: error

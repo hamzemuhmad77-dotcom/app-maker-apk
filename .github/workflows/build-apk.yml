@@ -39,32 +39,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
       - name: Download H2APK
         run: |
           git clone --depth=1 https://github.com/HashShin/H2APK.git h2apk
 
-      - name: Setup H2APK
+      - name: Setup & Build H2APK
         working-directory: h2apk
         run: |
           chmod +x setup.sh
           ./setup.sh
-
-      - name: Build H2APK
-        working-directory: h2apk
-        run: |
           go build -o h2apk main.go
 
-      - name: Start H2APK
-        working-directory: h2apk
-        run: |
-          PORT=8080 ./h2apk > server.log 2>&1 &
-          sleep 10
-
-      - name: Check H2APK
-        run: |
-          curl -f http://localhost:8080/
-
-      - name: Send Build Request
+      - name: Run Server and Build APK
         env:
           APP_NAME: ${{ inputs.app_name }}
           PACKAGE_NAME: ${{ inputs.package_name }}
@@ -72,9 +63,18 @@ jobs:
           VERSION_CODE: ${{ inputs.version_code }}
           HTML_CODE: ${{ inputs.html }}
         run: |
+          # 1. تشغيل الخادم في الخلفية داخل نفس الخطوة
+          cd h2apk
+          PORT=8080 ./h2apk > server.log 2>&1 &
+          SERVER_PID=$!
+          cd ..
+          
+          echo "انتظار تشغيل الخادم..."
+          sleep 5
+
+          # 2. تجهيز بيانات الطلب
           python3 - <<'PY'
-          import json
-          import os
+          import json, os
 
           data = {
               "app_name": os.environ["APP_NAME"],
@@ -98,22 +98,15 @@ jobs:
 
           with open("build-request.json", "w", encoding="utf-8") as f:
               json.dump(data, f, ensure_ascii=False)
-
-          print("تم تجهيز بيانات التطبيق")
           PY
 
+          # 3. إرسال الطلب
           RESPONSE=$(curl -sS -X POST \
             http://localhost:8080/api/build \
             -H "Content-Type: application/json" \
             --data-binary @build-request.json)
 
-          echo "$RESPONSE" | tee build-response.json
-
-          BUILD_ID=$(echo "$RESPONSE" | python3 -c '
-          import sys, json
-          data = json.load(sys.stdin)
-          print(data.get("build_id", ""))
-          ')
+          BUILD_ID=$(echo "$RESPONSE" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("build_id", ""))')
 
           if [ -z "$BUILD_ID" ]; then
             echo "فشل إرسال طلب البناء"
@@ -121,41 +114,21 @@ jobs:
             exit 1
           fi
 
-          echo "BUILD_ID=$BUILD_ID" >> "$GITHUB_ENV"
-
-      - name: Wait For APK
-        run: |
+          # 4. انتظار تجهيز الـ APK
           APK_NAME=""
-
           for i in {1..120}; do
-            echo "انتظار البناء: $i/120"
-
-            RESPONSE=$(curl -sS \
-              "http://localhost:8080/api/status/$BUILD_ID")
-
-            echo "$RESPONSE"
-
-            APK_NAME=$(echo "$RESPONSE" | python3 -c '
-            import sys, json
-            data = json.load(sys.stdin)
-            print(data.get("apk_name", ""))
-            ')
+            RESPONSE=$(curl -sS "http://localhost:8080/api/status/$BUILD_ID")
+            APK_NAME=$(echo "$RESPONSE" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("apk_name", ""))')
 
             if [ -n "$APK_NAME" ]; then
-              echo "تم إنشاء APK: $APK_NAME"
+              echo "تم إنشاء APK بنجاح: $APK_NAME"
               echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
               break
             fi
 
-            ERROR=$(echo "$RESPONSE" | python3 -c '
-            import sys, json
-            data = json.load(sys.stdin)
-            print(data.get("error", ""))
-            ')
-
+            ERROR=$(echo "$RESPONSE" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("error", ""))')
             if [ -n "$ERROR" ]; then
-              echo "فشل البناء:"
-              echo "$ERROR"
+              echo "فشل البناء: $ERROR"
               cat h2apk/server.log
               exit 1
             fi
@@ -171,16 +144,12 @@ jobs:
 
       - name: Verify APK
         run: |
-          APK_PATH="h2apk/output/$APK_NAME"
-
+          APK_PATH="h2apk/output/${{ env.APK_NAME }}"
           if [ ! -f "$APK_PATH" ]; then
             echo "لم يتم العثور على ملف APK"
             ls -la h2apk/output || true
             exit 1
           fi
-
-          echo "تم إنشاء APK بنجاح:"
-          ls -lh "$APK_PATH"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
